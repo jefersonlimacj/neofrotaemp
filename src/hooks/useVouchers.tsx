@@ -501,6 +501,10 @@ const GET_VOUCHERS_FILTROS = gql`
           id
         }
       }
+      modeloTurno {
+        ativo
+        nomeModelo
+      }
       rota {
         id
         tributacao
@@ -721,6 +725,11 @@ const GET_VOUCHER_FIXO_ID = gql`
         valorDeslocamento
         valorDeslocamentoRepasse
         valorPedagio
+      }
+      modeloTurno {
+        id
+        nomeModelo
+        ativo
       }
       adminUsuario {
         id

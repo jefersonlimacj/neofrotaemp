@@ -979,6 +979,10 @@ function Solicitante({ v }: { v: any }) {
 function CodigoRoteiro({ v }: { v: any }) {
   const Cor = useTema().Cor;
 
+  console.log(v)
+
+  const natureza = v?.natureza;
+
   return (
     <div
       style={{
@@ -1036,7 +1040,9 @@ function CodigoRoteiro({ v }: { v: any }) {
                   : Cor.textoExtra,
           }}
         >
-          {v?.modeloFixo?.nomeModelo}
+          {natureza === "Fixo"
+            ? v?.modeloFixo?.nomeModelo
+            : v?.modeloTurno?.nomeModelo}
         </p>
       </div>
     </div>

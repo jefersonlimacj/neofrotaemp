@@ -4,7 +4,7 @@ import { useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 import styled from "styled-components";
 
-function NavMenu({ sidebar, logado }: { sidebar: boolean; logado: any }) {
+function NavMenu({ sidebar }: { sidebar: boolean }) {
   const location = useLocation();
   const { Cor } = useTema();
 
@@ -44,9 +44,14 @@ function NavMenu({ sidebar, logado }: { sidebar: boolean; logado: any }) {
     //   submenu: false,
     //   itensSubMenu: [],
     // },
+    {
+      tela: "Configurações",
+      icone: "settings",
+      path: "/configuracoes",
+      submenu: false,
+      itensSubMenu: [],
+    },
   ];
-
-  console.log(logado.id)
 
   const [submenuAberto, setSubmenuAberto] = useState<string | null>(null);
 

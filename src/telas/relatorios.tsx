@@ -62,6 +62,11 @@ interface VoucherExportacao {
     nomeModelo: string;
     ativo: boolean;
   };
+  modeloTuro: {
+     id: string;
+    nomeModelo: string;
+    ativo: boolean;
+  }
   adminUsuario: {
     id: string;
     nome: string;
@@ -532,7 +537,7 @@ function TabelaVouchersFiltrados({
       </p>
       <p style={{ width: "5%", textAlign: "center" }}>Id</p>
       <p style={{ width: "17%" }}>Cliente / Unidade</p>
-      <p style={{ width: "8%" }}>Solicitante</p>
+      <p style={{ width: "8%" }}>Solici/Cod</p>
       <p style={{ width: "15%" }}>Motorista</p>
       <p style={{ width: "10%" }}>Data / Hora</p>
       <p style={{ width: "15%" }}>Origem - Destino</p>
@@ -690,7 +695,11 @@ function TabelaVouchersFiltrados({
                     padding: 5,
                   }}
                 >
-                  {v.solicitante.nome}
+                  {v.natureza === "Extra"
+                    ? v.solicitante?.nome || ""
+                    : v.natureza === "Fixo"
+                      ? v.modeloFixo?.nomeModelo || ""
+                      : v.modeloTurno?.nomeModelo || ""}
                 </p>
                 <div
                   style={{

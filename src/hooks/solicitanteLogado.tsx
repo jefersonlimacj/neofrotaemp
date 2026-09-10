@@ -4,6 +4,9 @@ interface solicitanteLogadoType {
   funcao: string;
   id: string;
   nome: string;
+  email: string;
+  senha: string;
+  telefone: string;
   statusSolicitante: string;
   empresaClienteId: {
     nome: string;

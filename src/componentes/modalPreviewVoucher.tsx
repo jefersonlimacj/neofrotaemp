@@ -64,6 +64,8 @@ function ModalPreviewVoucher({
     v?.natureza === "Extra" ? v?.id : null,
   );
 
+  console.log(v)
+
   const { voucherFixoId, loading: loadingFixo } = useVoucherFixoId(
     v?.natureza === "Fixo" || v?.natureza === "Turno" ? v?.id : null,
   );

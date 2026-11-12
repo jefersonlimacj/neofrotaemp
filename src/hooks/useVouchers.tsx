@@ -147,9 +147,12 @@ const GET_VOUCHERS = gql`
         funcao
         fotoUrlSolicitante
       }
-
       operadora {
         id
+        nome
+        logoOperadora
+        cnpj
+        rSocial
       }
       passageiros {
         id
@@ -322,7 +325,6 @@ export function useVouchersIds(ids: any, operadoraId: any) {
   };
 }
 
-
 const GET_VOUCHERS_DATA = gql`
   query VoucherOperadoraData($operadoraId: ID!, $diaSelecionado: String!) {
     voucherOperadoraData(
@@ -382,7 +384,6 @@ const GET_VOUCHERS_DATA = gql`
         tipoMotorista
         vCnh
       }
-
       carro {
         id
         placa
@@ -522,6 +523,7 @@ export const GET_VOUCHERS_EXPORTACAO = gql`
       id
       origem
       destino
+      assinatura
       dataHoraProgramado
       dataHoraCriacao
       dataHoraConclusao
@@ -539,6 +541,23 @@ export const GET_VOUCHERS_EXPORTACAO = gql`
       status
       observacao
       observacaoMotorista
+      
+      operadora {
+        id
+        nome
+        slug
+        logoOperadora
+        cnpj
+        rSocial
+        endRua
+        endNumero
+        endBairro
+        endCep
+        endCidade
+        endUf
+        statusOperadora
+      }
+
       carro {
         id
         placa
@@ -547,26 +566,37 @@ export const GET_VOUCHERS_EXPORTACAO = gql`
         cor
         ano
       }
+
       modeloFixo {
         id
         nomeModelo
         ativo
       }
+
+      modeloTurno {
+        id
+        nomeModelo
+        ativo
+      }
+
       adminUsuario {
         id
         nome
       }
+
       empresaCliente {
         id
         nome
         statusCliente
       }
+
       motorista {
         id
         nome
         tipoMotorista
         statusCnh
       }
+
       unidadeCliente {
         id
         nome
@@ -578,6 +608,7 @@ export const GET_VOUCHERS_EXPORTACAO = gql`
         endComplemento
         endUf
       }
+
       passageiros {
         id
         horarioEmbarqueReal
@@ -596,12 +627,141 @@ export const GET_VOUCHERS_EXPORTACAO = gql`
         rateio
         statusPresenca
       }
+
       rota {
         id
         origem
         destino
         tributacao
       }
+
+      solicitante {
+        id
+        nome
+        funcao
+      }
+    }
+  }
+`;
+
+export const GET_VOUCHERS_EXPORTACAO_IDS = gql`
+  query VouchersExportacaoIds($ids: [ID!]!, $operadoraId: ID!) {
+    vouchersIds(ids: $ids, operadoraId: $operadoraId) {
+      id
+      origem
+      destino
+      assinatura
+      dataHoraProgramado
+      dataHoraCriacao
+      dataHoraConclusao
+      valorViagem
+      valorViagemRepasse
+      valorDeslocamento
+      valorDeslocamentoRepasse
+      valorHoraParada
+      valorHoraParadaRepasse
+      valorPedagio
+      valorEstacionamento
+      qntTempoParado
+      natureza
+      tipoCorrida
+      status
+      observacao
+      observacaoMotorista
+
+      operadora {
+        id
+        nome
+        slug
+        logoOperadora
+        cnpj
+        rSocial
+        endRua
+        endNumero
+        endBairro
+        endCep
+        endCidade
+        endUf
+        statusOperadora
+      }
+
+      carro {
+        id
+        placa
+        marca
+        modelo
+        cor
+        ano
+      }
+
+      modeloFixo {
+        id
+        nomeModelo
+        ativo
+      }
+
+      modeloTurno {
+        id
+        nomeModelo
+        ativo
+      }
+
+      adminUsuario {
+        id
+        nome
+      }
+
+      empresaCliente {
+        id
+        nome
+        statusCliente
+      }
+
+      motorista {
+        id
+        nome
+        tipoMotorista
+        statusCnh
+      }
+
+      unidadeCliente {
+        id
+        nome
+        endRua
+        endNumero
+        endBairro
+        endCep
+        endCidade
+        endComplemento
+        endUf
+      }
+
+      passageiros {
+        id
+        horarioEmbarqueReal
+        passageiroId {
+          id
+          nome
+          matricula
+          endBairro
+          endCidade
+          centroCustoClienteId {
+            codigo
+            id
+            nome
+          }
+        }
+        rateio
+        statusPresenca
+      }
+
+      rota {
+        id
+        origem
+        destino
+        tributacao
+      }
+
       solicitante {
         id
         nome

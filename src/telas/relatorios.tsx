@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import BaseTelas from "../componentes/baseTelas";
 import EditPerfil from "../componentes/editPerfil";
 import { useTema } from "../hooks/temaContext";
@@ -7,7 +7,7 @@ import { useMotorista } from "../hooks/useMotorista";
 import { useSolicitante } from "../hooks/useSolicitantes";
 import {
   GET_VOUCHERS_EXPORTACAO,
-  useEditarVouchersEmMassa,
+  GET_VOUCHERS_EXPORTACAO_IDS,
   useVouchersFiltrados,
   useVouchersIds,
 } from "../hooks/useVouchers";
@@ -16,6 +16,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 import { useLazyQuery } from "@apollo/client";
 import { exportarPlanilhaFunc } from "../hooks/exportarPlanilha";
 import ModalPreviewVoucher from "../componentes/modalPreviewVoucher";
+import { exportarVouchersPDF } from "../hooks/exportarVouchersPDF";
 
 function Relatorios() {
   return BaseTelas({
@@ -28,7 +29,7 @@ function Relatorios() {
   });
 }
 
-interface VoucherExportacao {
+interface  VoucherExportacao {
   id: string;
   origem: string;
   destino: string;
@@ -62,11 +63,11 @@ interface VoucherExportacao {
     nomeModelo: string;
     ativo: boolean;
   };
-  modeloTuro: {
-     id: string;
+  modeloTurno: {
+    id: string;
     nomeModelo: string;
     ativo: boolean;
-  }
+  };
   adminUsuario: {
     id: string;
     nome: string;
@@ -93,6 +94,10 @@ interface VoucherExportacao {
     endComplemento: string;
     endUf: string;
   };
+  operadoraId: {
+    id: string;
+    nome: string;
+  }
   passageiros?: Array<{
     id: string;
     horarioEmbarqueReal: string;
@@ -131,9 +136,11 @@ function RelatorioConteudo() {
 
   const operadoraId = useSolicitanteLogado()?.operadoraId.id;
 
-  const empresaClienteId = useSolicitanteLogado()?.empresaClienteId.id
+  const empresaClienteId = useSolicitanteLogado()?.empresaClienteId.id;
 
   const [visivel, setVisivel] = useState<boolean>(false);
+
+  const [exportando, setExportando] = useState(false);
 
   const [modalPreveiw, setModalPreview] = useState(false);
   const [voucherPreview, setVoucherPreview] = useState<any>(null);
@@ -172,19 +179,42 @@ function RelatorioConteudo() {
     refetch,
   } = useVouchersFiltrados(filtro);
 
-  const { listaVouchersIds } = useVouchersIds(idsParaBusca, operadoraId);
+  const { listaVouchersIds, loading: loadingBuscaIds } = useVouchersIds(
+    idsParaBusca,
+    String(operadoraId),
+  );
 
-  const listaRelatorio =
-    listaVouchersIds && listaVouchersIds.length > 0
-      ? listaVouchersIds
-      : listaPrincipal;
+  // Identifica se existe uma pesquisa por ID
+  const temBuscaPorId = useMemo(() => {
+    return idsParaBusca.some((id) => String(id).trim() !== "");
+  }, [idsParaBusca]);
+
+  // IDs atualmente pesquisados
+  const idsPesquisados = useMemo(() => {
+    return new Set(idsParaBusca.map((id) => String(id).trim()));
+  }, [idsParaBusca]);
+
+  // Define quais vouchers serão exibidos
+  const listaRelatorio = useMemo(() => {
+    if (temBuscaPorId) {
+      return (listaVouchersIds ?? []).filter((voucher: any) =>
+        idsPesquisados.has(String(voucher.id)),
+      );
+    }
+
+    return listaPrincipal ?? [];
+  }, [temBuscaPorId, listaVouchersIds, idsPesquisados, listaPrincipal]);
 
   const [buscarDadosExportacao, { loading: CarregandoExportacao }] =
     useLazyQuery(GET_VOUCHERS_EXPORTACAO, {
       fetchPolicy: "network-only",
     });
 
-       const extrairData = (dataString: string | null | undefined) => {
+  const [buscarDadosExportacaoIds] = useLazyQuery(GET_VOUCHERS_EXPORTACAO_IDS, {
+    fetchPolicy: "network-only",
+  });
+
+  const extrairData = (dataString: string | null | undefined) => {
     if (!dataString) return "-";
     const data = new Date(dataString);
     if (isNaN(data.getTime())) return dataString;
@@ -202,9 +232,183 @@ function RelatorioConteudo() {
       timeZone: "UTC",
     });
   };
-  // Passamos o array tipado com a interface que você já criou
+
+  const obterVouchersParaExportacao = async (): Promise<
+    VoucherExportacao[]
+  > => {
+    // =========================================
+    // 1. PESQUISA POR ID TEM PRIORIDADE
+    // =========================================
+
+    if (temBuscaPorId) {
+      // Evita exportar antes de concluir a pesquisa
+      if (loadingBuscaIds) {
+        throw new Error("Aguarde a conclusão da pesquisa por ID.");
+      }
+
+      // Utiliza somente os IDs dos vouchers
+      // que realmente aparecem no relatório
+      const ids = [
+        ...new Set(listaRelatorio.map((voucher: any) => String(voucher.id))),
+      ];
+
+      if (ids.length === 0) {
+        return [];
+      }
+
+      if (!operadoraId) {
+        throw new Error("Operadora não identificada.");
+      }
+
+      // Busca todos os campos necessários
+      // para Excel e PDF, somente desses IDs
+      const { data } = await buscarDadosExportacaoIds({
+        variables: {
+          ids,
+          operadoraId: String(operadoraId),
+        },
+      });
+
+      const vouchers = (data?.vouchersIds ?? []) as VoucherExportacao[];
+
+      // Mantém exatamente os IDs exibidos e
+      // a ordem da lista do relatório
+      const vouchersPorId = new Map(
+        vouchers.map((voucher) => [String(voucher.id), voucher]),
+      );
+
+      return ids
+        .map((id) => vouchersPorId.get(id as string))
+        .filter(
+          (voucher): voucher is VoucherExportacao => voucher !== undefined,
+        );
+    }
+
+    // =========================================
+    // 2. EXPORTAÇÃO PELOS FILTROS GERAIS
+    // =========================================
+
+    const { data } = await buscarDadosExportacao({
+      variables: { filtro },
+    });
+
+    console.log("Dados exportação:", data?.vouchersFiltrados);
+
+    return (data?.vouchersFiltrados ?? []) as VoucherExportacao[];
+  };
+
   const prepararDadosParaExcel = (vouchers: VoucherExportacao[]) => {
-     return vouchers.flatMap((voucher: any) => {
+    return vouchers.map((voucher) => {
+      // 1. Montamos um objeto base com os dados que vêm antes dos passageiros
+
+      const totalCobranca =
+        (voucher.valorViagem || 0) +
+        (voucher.valorDeslocamento || 0) +
+        (voucher.valorPedagio || 0) +
+        (voucher.qntTempoParado || 0) * (voucher.valorHoraParada || 0);
+
+      const totalRepasse =
+        (voucher.valorViagemRepasse || 0) +
+        (voucher.valorDeslocamentoRepasse || 0) +
+        (voucher.valorPedagio || 0) +
+        (voucher.qntTempoParado || 0) * (voucher.valorHoraParadaRepasse || 0);
+
+      const linhaExcel: any = {
+        ID: voucher.id,
+        Observação: voucher.observacao,
+        Status: voucher.status,
+        "Data Programada": extrairData(voucher.dataHoraProgramado),
+        "Hora Programada": extrairHora(voucher.dataHoraProgramado),
+        "Data Conclusão": extrairData(voucher.dataHoraConclusao),
+        "Hora Conclusão": extrairHora(voucher.dataHoraConclusao),
+        "Empresa Cliente": voucher.empresaCliente?.nome || "-",
+        "Unidade Cliente": voucher.unidadeCliente?.nome || "-",
+        Motorista: voucher.motorista?.nome || "Sem motorista",
+        "Observação Motorista": voucher.observacaoMotorista || "-",
+        "Veículo (Placa)": voucher.carro?.placa || "-",
+        Origem: voucher.rota?.origem || voucher.origem || "-",
+        Destino: voucher.rota?.destino || voucher.destino || "-",
+        Tributação: voucher.rota?.tributacao || "-",
+        "Cod. Fixo":
+          voucher.natureza === "Fixo"
+            ? voucher.modeloFixo?.nomeModelo || "-"
+            : "-",
+        "Cod.Turno":
+          voucher.natureza === "Turno"
+            ? voucher.modeloTurno?.nomeModelo || "_"
+            : "-",
+        Rota:
+          voucher.natureza === "Extra"
+            ? voucher.rota
+              ? `Rota ID: ${voucher.rota.id} - ${voucher.rota.origem} X ${voucher.rota.destino}`
+              : `Rota não vinculada - ${voucher.origem || "-"} X ${voucher.destino || "-"}`
+            : "-",
+        Solicitante:
+          voucher.natureza === "Extra" ? voucher.solicitante?.nome || "-" : "-",
+        Natureza: voucher.natureza,
+        "Tipo de Corrida": voucher.tipoCorrida,
+        "Valor Viagem": voucher.valorViagem || 0,
+        "Valor Deslocamento": voucher.valorDeslocamento || 0,
+        "Valor Hora Parada":
+          voucher.valorHoraParada * voucher.qntTempoParado || 0,
+        "Tempo Parado": voucher.qntTempoParado || 0,
+        "Valor Viagem Repasse": voucher.valorViagemRepasse || 0,
+        "Valor Deslocamento Repasse": voucher.valorDeslocamentoRepasse || 0,
+        "Valor Hora Parada Repasse":
+          voucher.valorHoraParadaRepasse * voucher.qntTempoParado || 0,
+        "Valor Pedágio": voucher.valorPedagio || 0,
+        "Total Cobrança": totalCobranca,
+        "Total Repasse": totalRepasse,
+      };
+
+      if (voucher.passageiros && voucher.passageiros.length > 0) {
+        // Identifica a quantidade de passageiros válidos para o rateio
+        const totalConsideradosNoRateio = voucher.passageiros.filter(
+          (p: any) =>
+            p.statusPresenca === "Presente" || p.statusPresenca === "Agendado",
+        ).length;
+
+        voucher.passageiros.forEach((p, index) => {
+          const nome = p.passageiroId?.nome || "Sem nome";
+          const status = p.statusPresenca || "Sem status";
+          const centroCusto =
+            p.passageiroId?.centroCustoClienteId?.nome || "Sem Centro de Custo";
+          const centroCustoCod =
+            p.passageiroId?.centroCustoClienteId?.codigo || "--";
+
+          let custoPassageiro: any = 0;
+          const participaDaDivisao =
+            status === "Presente" || status === "Agendado";
+
+          if (participaDaDivisao && totalConsideradosNoRateio > 0) {
+            custoPassageiro = {
+              f: `${totalCobranca}/${totalConsideradosNoRateio}`,
+              t: "n",
+            };
+          }
+
+          // Mantendo as 4 colunas em sequência na mesma linha Excel
+          linhaExcel[`Passageiro ${index + 1}`] = `${nome}`;
+          linhaExcel[`Passageiro ${index + 1} Status`] = `${status}`;
+          linhaExcel[`Passageiro ${index + 1} CC`] =
+            `${centroCusto} - ${centroCustoCod}`;
+          linhaExcel[`Passageiro ${index + 1} Custo (Rateio)`] =
+            custoPassageiro;
+        });
+      } else {
+        linhaExcel["Passageiro 1"] = "Sem passageiros";
+      }
+
+      return linhaExcel;
+    });
+  };
+
+
+  // ------------------------------------ FUNÇÃO NOVA PARA EXTRAÇÃO DE RELATÓRIOS -----------------------------------//
+
+
+  const prepararDadosParaExcelCentroCusto = (vouchers: VoucherExportacao[]) => {
+    return vouchers.flatMap((voucher: any) => {
       // 1. Calculamos o custo total atualizado da cobrança
       const totalCobranca =
         (voucher.valorViagem || 0) +
@@ -222,6 +426,7 @@ function RelatorioConteudo() {
         Solicitante: voucher.solicitante?.nome || "-",
         Origem: voucher.rota?.origem || voucher.origem || "-",
         Destino: voucher.rota?.destino || voucher.destino || "-",
+        tributação: voucher.rota?.tributacao || "-",
         Natureza: voucher.natureza,
         "Tipo de Corrida": voucher.tipoCorrida,
         Motorista: voucher.motorista?.nome || "Sem motorista",
@@ -273,7 +478,6 @@ function RelatorioConteudo() {
             f: `${totalCobranca}/${totalConsideradosNoRateio}`,
             t: "n",
           };
-
           // Calcula a porcentagem igualitária
           porcentagemRateio = parseFloat(
             (100 / totalConsideradosNoRateio).toFixed(2),
@@ -294,24 +498,75 @@ function RelatorioConteudo() {
     });
   };
 
-  const ExportarPlanilha = async () => {
-    const { data } = await buscarDadosExportacao({
-      variables: { filtro },
-    });
+  const executarExportacao = async (
+    gerarArquivo: (vouchers: VoucherExportacao[]) => void | Promise<void>,
+  ) => {
+    if (exportando) return;
 
-    if (data && data.vouchersFiltrados && data.vouchersFiltrados.length > 0) {
-      // 2. Transforma (achata) os dados para o formato do Excel
-      const dadosFormatados = prepararDadosParaExcel(data.vouchersFiltrados);
+    setExportando(true);
 
-      exportarPlanilhaFunc(
-        dadosFormatados,
-        `Relatorio_NeoFrota_Vouchers_${formatarParaYMD(hoje)}`,
-        "xlsx",
+    try {
+      const vouchers = await obterVouchersParaExportacao();
+
+      if (vouchers.length === 0) {
+        alert("Nenhum voucher encontrado para exportação.");
+        return;
+      }
+
+      await gerarArquivo(vouchers);
+    } catch (error) {
+      console.error("Erro na exportação:", error);
+
+      alert(
+        error instanceof Error ? error.message : "Ocorreu um erro ao exportar.",
       );
-    } else {
-      alert("Nenhum dado encontrado para os filtros selecionados.");
+    } finally {
+      setExportando(false);
     }
   };
+
+  // RELATÓRIO GERAL
+  const ExportarRelatorioGeral = async () => {
+    await executarExportacao((vouchers) => {
+      const dados = prepararDadosParaExcel(vouchers);
+
+      const operadora = vouchers[0]?.operadoraId?.nome || "Empresa";
+
+      exportarPlanilhaFunc(
+        dados,
+        `Relatorio_${operadora}_Geral_${formatarParaYMD(hoje)}`,
+        "xlsx",
+      );
+    });
+  };
+
+  // RELATÓRIO POR CENTRO DE CUSTO
+  const ExportarRelatorioCentroCusto = async () => {
+    await executarExportacao((vouchers) => {
+      const dados = prepararDadosParaExcelCentroCusto(vouchers);
+
+      const operadora = vouchers[0]?.operadoraId?.nome || "Empresa";
+
+      exportarPlanilhaFunc(
+        dados,
+        `Relatorio_${operadora}_CentroCusto_${formatarParaYMD(hoje)}`,
+        "xlsx",
+      );
+    });
+  };
+
+  // IMPRESSÃO DE VOUCHERS EM PDF
+  const ExportarPDF = async () => {
+    await executarExportacao((vouchers) => {
+
+      const operadora = vouchers[0]?.operadoraId?.nome || "Empresa";
+
+      exportarVouchersPDF(vouchers, {
+        nome: operadora || "NEOFROTA GESTÃO DE TRANSPORTES",
+      });
+    });
+  };
+
   return (
     <>
       <div
@@ -356,7 +611,9 @@ function RelatorioConteudo() {
           filtroAtivo={filtro}
           setFiltroAtivo={setFiltro}
           setIdsParaBusca={setIdsParaBusca}
-          exportarPlanilha={ExportarPlanilha}
+          exportarRelatorioGeral={ExportarRelatorioGeral}
+          exportarRelatorioCentroCusto={ExportarRelatorioCentroCusto}
+          exportarPDF={ExportarPDF}
           carregandoExportacao={CarregandoExportacao}
         />
         <TabelaVouchersFiltrados
@@ -456,9 +713,6 @@ const LinhaTabela = styled.div<LinhaTabelaProps>`
 function TabelaVouchersFiltrados({
   listaFiltro,
   loading,
-  setVisivel,
-  visivel,
-  refetch,
   setV,
   setM,
 }: {
@@ -1035,1505 +1289,27 @@ function TabelaVouchersFiltrados({
           <p style={{ whiteSpace: "nowrap" }}>
             {selecionados.length} - Vouchers Selecionados
           </p>
-         
-          <ModalEditarMassa
-            setVisivel={setVisivel}
-            visivel={visivel}
-            idsSelecionados={selecionados}
-            refetch={refetch}
-          />
         </div>
       </div>
     </div>
   );
 }
 
-const Overlay = styled.div<{ $visivel: boolean; $bg: string }>`
-  width: 100vw;
-  height: 100vh;
-  background-color: ${({ $bg }) => `${$bg}90`};
-  position: absolute;
-  display: flex;
-  flex-direction: row;
-  justify-content: center;
-  align-items: center;
-  top: 0;
-  left: 0;
-  padding: 1%;
-  z-index: 10;
-  backdrop-filter: blur(3px);
-  opacity: ${({ $visivel }) => ($visivel ? 1 : 0)};
-  pointer-events: ${({ $visivel }) => ($visivel ? "auto" : "none")};
-  transition: all 0.3s ease-in-out;
-`;
-
-interface CxModalProps {
-  $border: string;
-  $visivel: boolean;
-  $bg: string;
-}
-
-const CxModal = styled.div<CxModalProps>`
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-start;
-  align-items: center;
-  gap: 7px;
-  padding: 15px;
-  width: 70%;
-  border-radius: 22px;
-  border: 1px solid ${({ $border }) => $border};
-  background-color: ${({ $bg }) => $bg};
-  position: absolute;
-  z-index: 11;
-  transform: ${({ $visivel }) => ($visivel ? "scale(1)" : "scale(0.6)")};
-  opacity: ${({ $visivel }) => ($visivel ? 1 : 0)};
-  pointer-events: ${({ $visivel }) => ($visivel ? "auto" : "none")};
-  transition: all 0.3s ease-in-out;
-  box-shadow: 4px 4px 8px #00000020;
-`;
-
-function ModalEditarMassa({
-  visivel,
-  setVisivel,
-  idsSelecionados,
-  refetch,
-}: {
-  visivel: boolean;
-  setVisivel: (v: boolean) => void;
-  idsSelecionados: string[];
-  refetch: any;
-}) {
-  const [natureza, setNatureza] = useState<any>();
-  const [status, setStatus] = useState<any>();
-  const [tipoCorrida, setTipoCorrida] = useState<any>("");
-  const [motoristaId, setMotoristaId] = useState<any>();
-  const [dataHoraProgramado, setDataHoraProgramado] = useState<any>();
-  const [observacao, setObservacao] = useState<any>();
-
-  const [qntTempoParado, setQntTempoParado] = useState<any>();
-  const [valorDeslocamento, setValorDeslocamento] = useState<any>();
-  const [valorDeslocamentoRepasse, setValorDeslocamentoRepasse] =
-    useState<any>();
-  const [valorEstacionamento, setValorEstacionamento] = useState<any>();
-  const [valorHoraParada, setValorHoraParada] = useState<any>();
-  const [valorHoraParadaRepasse, setValorHoraParadaRepasse] = useState<any>();
-  const [valorPedagio, setValorPedagio] = useState<any>();
-  const [valorViagem, setValorViagem] = useState<any>();
-  const [valorViagemRepasse, setValorViagemRepasse] = useState<any>();
-
-  const operId = useSolicitanteLogado()?.operadoraId.id;
-
-  const { editar, loading } = useEditarVouchersEmMassa();
-
-  const limparCampos = () => {
-    setNatureza("");
-    setStatus("");
-    setTipoCorrida("");
-    setMotoristaId("");
-    setDataHoraProgramado("");
-    setObservacao("");
-    setQntTempoParado("");
-    setValorDeslocamento("");
-    setValorDeslocamentoRepasse("");
-    setValorEstacionamento("");
-    setValorHoraParada("");
-    setValorHoraParadaRepasse("");
-    setValorPedagio("");
-    setValorViagem("");
-    setValorViagemRepasse("");
-  };
-
-  const editarEmMassaFunc = async () => {
-    if (idsSelecionados.length === 0) {
-      alert("Nenhum voucher selecionado preparado para Edição");
-      return;
-    }
-
-    const edit = {
-      natureza,
-      status,
-      tipoCorrida,
-      motoristaId,
-      dataHoraProgramado: dataHoraProgramado
-        ? new Date(dataHoraProgramado)
-        : undefined,
-      observacao,
-      qntTempoParado,
-      valorDeslocamento: valorDeslocamento
-        ? parseFloat(valorDeslocamento)
-        : undefined,
-      valorDeslocamentoRepasse: valorDeslocamentoRepasse
-        ? parseFloat(valorDeslocamentoRepasse)
-        : undefined,
-      valorEstacionamento: valorEstacionamento
-        ? parseFloat(valorEstacionamento)
-        : undefined,
-      valorHoraParada: valorHoraParada
-        ? parseFloat(valorHoraParada)
-        : undefined,
-      valorHoraParadaRepasse: valorHoraParadaRepasse
-        ? parseFloat(valorHoraParadaRepasse)
-        : undefined,
-      valorPedagio: valorPedagio ? parseFloat(valorPedagio) : undefined,
-      valorViagem: valorViagem ? parseFloat(valorViagem) : undefined,
-      valorViagemRepasse: valorViagemRepasse
-        ? parseFloat(valorViagemRepasse)
-        : undefined,
-    };
-
-    const inputLimpo = Object.fromEntries(
-      Object.entries(edit).filter(
-        ([_, valor]) => valor !== "" && valor !== undefined && valor !== null,
-      ),
-    );
-
-    if (Object.keys(inputLimpo).length === 0) {
-      alert("Preencha pelo menos um campo para aplicar a edição em massa.");
-      return;
-    }
-
-    const editFinal = { ids: idsSelecionados, ...inputLimpo };
-
-    await editar(editFinal);
-
-    setVisivel(false);
-    limparCampos();
-    refetch();
-
-    return;
-  };
-
-  const { listaMotoristas } = useMotorista(operId);
-
-  const { Cor } = useTema();
-
-  return (
-    <Overlay
-      $visivel={visivel}
-      $bg={Cor.base}
-      onClick={() => setVisivel(false)}
-    >
-      <CxModal
-        $visivel={visivel}
-        $bg={Cor.base}
-        $border={Cor.texto2 + "50"}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div
-          style={{ display: "flex", flexDirection: "column", width: "100%" }}
-        >
-          <p
-            style={{
-              fontSize: 16,
-              fontWeight: "normal",
-              color: Cor.primariaTxt,
-            }}
-          >
-            Edição em <strong>Massa</strong> de Vouchers
-          </p>
-          <p style={{ fontSize: 12, fontWeight: "normal" }}>
-            Os Campos editados serão alterados em todos os vouchers anteriomente
-            selecionados.
-          </p>
-          <div
-            style={{
-              width: "100%",
-              height: 1,
-              backgroundColor: Cor.secundaria,
-            }}
-          />
-        </div>
-        {/* Primeira Linha de Opcionais */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            width: "100%",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Natureza:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <select
-                name=""
-                id=""
-                style={{
-                  outline: "none",
-                  border: "none",
-                  width: "100%",
-                  backgroundColor: "transparent",
-                  color: Cor.texto1,
-                }}
-                onChange={(e) => setNatureza(e.target.value)}
-                value={natureza}
-              >
-                <option
-                  value={""}
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 + 70 }}
-                >
-                  Defina a Natureza
-                </option>
-                <option
-                  value="Fixo"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Fixo
-                </option>
-                <option
-                  value="Extra"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Extra
-                </option>
-                <option
-                  value="Turno"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Turno
-                </option>
-              </select>
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Tipo da Corrida:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <select
-                name=""
-                id=""
-                style={{
-                  outline: "none",
-                  border: "none",
-                  width: "100%",
-                  backgroundColor: "transparent",
-                  color: Cor.texto1,
-                }}
-                onChange={(e) => setTipoCorrida(e.target.value)}
-                value={tipoCorrida}
-              >
-                <option
-                  value={""}
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 + 70 }}
-                >
-                  Defina o tipo da Corrida
-                </option>
-                <option
-                  value="Entrada"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Entrada
-                </option>
-                <option
-                  value="Saida"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Saída
-                </option>
-              </select>
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Status Voucher:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <select
-                name=""
-                id=""
-                style={{
-                  outline: "none",
-                  border: "none",
-                  width: "100%",
-                  backgroundColor: "transparent",
-                  color: Cor.texto1,
-                }}
-                onChange={(e) => setStatus(e.target.value)}
-                value={status}
-              >
-                <option
-                  value={""}
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 + 70 }}
-                >
-                  Defina o status do Vouchers
-                </option>
-                <option
-                  value="Aberto"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Aberto
-                </option>
-                <option
-                  value="Concluido"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Concluido
-                </option>
-                <option
-                  value="Cancelado"
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 }}
-                >
-                  Cancelado
-                </option>
-              </select>
-            </div>
-          </div>
-        </div>
-        {/* Primeira Linha de Opcionais */}
-        <div
-          style={{
-            width: "100%",
-            height: 1,
-            backgroundColor: Cor.texto2 + 90,
-          }}
-        />
-        {/* Segunda Linha de Opcionais */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            width: "100%",
-            justifyContent: "space-evenly",
-            alignItems: "center",
-          }}
-        >
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Motorista:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <select
-                name=""
-                id=""
-                style={{
-                  outline: "none",
-                  border: "none",
-                  width: "100%",
-                  backgroundColor: "transparent",
-                  color: Cor.texto1,
-                }}
-                onChange={(e) => setMotoristaId(e.target.value)}
-                value={motoristaId}
-              >
-                <option
-                  value={""}
-                  style={{ backgroundColor: Cor.base2, color: Cor.texto2 + 70 }}
-                >
-                  Selecione o Motorista
-                </option>
-                {listaMotoristas?.map((m: any) => {
-                  return (
-                    <option
-                      key={m.id}
-                      value={m.id}
-                      style={{
-                        backgroundColor: Cor.base2,
-                        color: Cor.texto2,
-                      }}
-                    >
-                      {m.nome}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Data Programada:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="datetime-local"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={dataHoraProgramado}
-                onChange={(e) => setDataHoraProgramado(e.target.value)}
-              />
-            </div>
-          </div>
-        </div>
-        {/* Segunda Linha de Opcionais */}
-        <div
-          style={{
-            width: "100%",
-            height: 1,
-            backgroundColor: Cor.texto2 + 90,
-          }}
-        />
-        {/* Terceira Linha Valores */}
-        {/* Parte 1 */}
-        <div
-          style={{
-            width: "100%",
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "space-between",
-          }}
-        >
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Viagem:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorViagem}
-                onChange={(e) => setValorViagem(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Deslocamento:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorDeslocamento}
-                onChange={(e) => setValorDeslocamento(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Hora Parada:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorHoraParada}
-                onChange={(e) => setValorHoraParada(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-        </div>
-        {/* Parte 1 */}
-        {/* Parte 2 */}
-        <div
-          style={{
-            width: "100%",
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "space-between",
-          }}
-        >
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Viagem Repasse:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorViagemRepasse}
-                onChange={(e) => setValorViagemRepasse(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Deslocamento Repasse:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorDeslocamentoRepasse}
-                onChange={(e) => setValorDeslocamentoRepasse(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Hora Parada Repasse:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorHoraParadaRepasse}
-                onChange={(e) => setValorHoraParadaRepasse(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-        </div>
-        {/* Parte 2 */}
-        {/* Parte 3 */}
-        <div
-          style={{
-            width: "100%",
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "space-between",
-          }}
-        >
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Estacionamento:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorEstacionamento}
-                onChange={(e) => setValorEstacionamento(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Valor Pedágio:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={valorPedagio}
-                onChange={(e) => setValorPedagio(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", width: "32%" }}
-          >
-            <p
-              style={{
-                fontSize: 14,
-                color: Cor.primariaTxt + 90,
-                fontWeight: "bold",
-                margin: 5,
-              }}
-            >
-              Tempo Parado:
-            </p>
-            <div
-              style={{
-                width: "100%",
-                border: `1px solid ${Cor.texto2 + 50}`,
-                padding: 10,
-                borderRadius: 14,
-              }}
-            >
-              <input
-                type="number"
-                style={{
-                  border: "none",
-                  outline: "none",
-                  backgroundColor: "transparent",
-                  width: "100%",
-                  color: Cor.texto1,
-                }}
-                value={qntTempoParado}
-                onChange={(e) => setQntTempoParado(e.target.value)}
-                placeholder="Digite aqui..."
-              />
-            </div>
-          </div>
-        </div>
-        {/* Parte 3 */}
-        {/* Terceira Linha Valores */}
-        <div
-          style={{
-            width: "100%",
-            height: 1,
-            backgroundColor: Cor.texto2 + 90,
-          }}
-        />
-        {/* Observação do Operador */}
-        <div
-          style={{ display: "flex", flexDirection: "column", width: "100%" }}
-        >
-          <p
-            style={{
-              fontSize: 14,
-              color: Cor.primariaTxt + 90,
-              fontWeight: "bold",
-              margin: 5,
-            }}
-          >
-            Observação do Operador:
-          </p>
-          <div
-            style={{
-              width: "100%",
-              border: `1px solid ${Cor.texto2 + 50}`,
-              padding: 10,
-              borderRadius: 14,
-            }}
-          >
-            <input
-              type="text"
-              style={{
-                border: "none",
-                outline: "none",
-                backgroundColor: "transparent",
-                width: "100%",
-                color: Cor.texto1,
-              }}
-              value={observacao}
-              onChange={(e) => setObservacao(e.target.value)}
-              placeholder="Digite aqui..."
-            />
-          </div>
-        </div>
-        {/* Observação do Operador */}
-        <div
-          style={{
-            width: "100%",
-            height: 1,
-            backgroundColor: Cor.texto2 + 90,
-          }}
-        />
-        {/* Ações */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "space-between",
-            width: "100%",
-            gap: 10,
-          }}
-        >
-          <BtnVouchers $bg={Cor.atencao}>
-            <p>Cancelar Vouchers</p>
-          </BtnVouchers>
-          <BtnVouchers $bg={Cor.primaria} onClick={() => editarEmMassaFunc()}>
-            <p>{loading ? "Salvando..." : "Salvar para Todos"}</p>
-          </BtnVouchers>
-        </div>
-        {/* Ações */}
-      </CxModal>
-    </Overlay>
-  );
-}
-
-interface BtnVouchersProps {
-  $bg: string;
-}
-
-const BtnVouchers = styled.div<BtnVouchersProps>`
-  width: 15%;
-  padding: 10px;
-  background-color: ${({ $bg }) => $bg + 50};
-  border-radius: 14px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  color: ${({ $bg }) => $bg};
-  border: 1px solid ${({ $bg }) => $bg + 50};
-  transition: all 0.3s ease-in-out;
-  cursor: pointer;
-  user-select: none;
-
-  &:hover {
-    background-color: ${({ $bg }) => $bg + 90};
-    scale: 1.02;
-  }
-
-  &:active {
-    background-color: ${({ $bg }) => $bg + 70};
-    scale: 0.98;
-  }
-`;
-
-// interface CardProps {
-//   $cor: string;
-//   $direction: string;
-//   $padding: string;
-// }
-
-// const Card = styled.div<CardProps>`
-//   width: 25%;
-//   height: 100px;
-//   border-radius: 14px;
-//   background-color: ${({ $cor }) => $cor + 50};
-//   padding: ${({ $padding }) => $padding};
-//   display: flex;
-//   flex-direction: ${({ $direction }) => $direction};
-//   justify-content: space-between;
-//   transition: ease-in-out all 0.1s;
-//   user-select: none;
-//   cursor: pointer;
-
-//   &:hover {
-//     background-color: ${({ $cor }) => $cor + 70};
-//     scale: 1.02;
-//   }
-
-//   &:active {
-//     background-color: ${({ $cor }) => $cor + 90};
-//     scale: 0.98;
-//   }
-// `;
-
-// const CardT = styled.div<CardProps>`
-//   width: 25%;
-//   height: 100px;
-//   border-radius: 14px;
-//   background-color: ${({ $cor }) => $cor};
-//   padding: ${({ $padding }) => $padding};
-//   display: flex;
-//   flex-direction: ${({ $direction }) => $direction};
-//   justify-content: space-between;
-//   transition: ease-in-out all 0.1s;
-//   user-select: none;
-//   cursor: pointer;
-
-//   &:hover {
-//     background-color: ${({ $cor }) => $cor + "BB"};
-//     scale: 1.02;
-//   }
-
-//   &:active {
-//     background-color: ${({ $cor }) => $cor + "CC"};
-//     scale: 0.98;
-//   }
-// `;
-
-// function ResumoValores({
-//   listaRelatorio,
-// }: {
-//   listaRelatorio: any;
-//   filtro: any;
-// }) {
-//   const totais = listaRelatorio.reduce(
-//     (soma: any, voucher: any) => {
-//       const totalHoraParadaVoucher =
-//         (voucher.valorHoraParada || 0) * (voucher.qntTempoParado || 0);
-//       const totalHoraParadaRepasseVoucher =
-//         (voucher.valorHoraParadaRepasse || 0) * (voucher.qntTempoParado || 0);
-
-//       return {
-//         viagem: soma.viagem + (voucher.valorViagem || 0),
-//         viagemRepasse: soma.viagemRepasse + (voucher.valorViagemRepasse || 0),
-//         deslocamento: soma.deslocamento + (voucher.valorDeslocamento || 0),
-//         deslocamentoRepasse:
-//           soma.deslocamentoRepasse + (voucher.valorDeslocamentoRepasse || 0),
-//         pedagio: soma.pedagio + (voucher.valorPedagio || 0),
-//         // Aqui somamos os valores já calculados com o tempo parado
-//         horaParada: soma.horaParada + totalHoraParadaVoucher,
-//         horaParadaRepasse:
-//           soma.horaParadaRepasse + totalHoraParadaRepasseVoucher,
-//       };
-//     },
-//     {
-//       viagem: 0,
-//       viagemRepasse: 0,
-//       deslocamento: 0,
-//       deslocamentoRepasse: 0,
-//       pedagio: 0,
-//       horaParada: 0,
-//       horaParadaRepasse: 0,
-//     },
-//   );
-
-//   const totalViagem =
-//     totais.viagem + totais.deslocamento + totais.pedagio + totais.horaParada;
-
-//   const totalRepasse =
-//     totais.viagemRepasse +
-//     totais.deslocamentoRepasse +
-//     totais.pedagio +
-//     totais.horaParadaRepasse;
-
-//   function motoristasUnicos() {
-//     const totalMotoristas = new Set(
-//       listaRelatorio.map((v: any) => v.motorista.id),
-//     );
-
-//     return totalMotoristas.size || 0;
-//   }
-
-//   const lucro = totalViagem - totalRepasse;
-
-//   const porcentLucro = (lucro / totalViagem) * 100;
-
-//   const qntHP = listaRelatorio.reduce((soma: any, voucher: any) => {
-//     return soma + (voucher.qntTempoParado || 0);
-//   }, 0);
-
-//   const valorCobrancaHp = listaRelatorio.reduce((soma: any, voucher: any) => {
-//     return soma + (voucher.valorHoraParada * voucher.qntTempoParado || 0);
-//   }, 0);
-
-//   const valorRepasseHp = listaRelatorio.reduce((soma: any, voucher: any) => {
-//     return (
-//       soma + (voucher.valorHoraParadaRepasse * voucher.qntTempoParado || 0)
-//     );
-//   }, 0);
-
-//   const totalFixos = listaRelatorio.filter((v: any) => v.natureza === "Fixo");
-//   const totalExtras = listaRelatorio.filter((v: any) => v.natureza === "Extra");
-//   const totalTurnos = listaRelatorio.filter((v: any) => v.natureza === "Turno");
-
-//   function formatarValor(valor: any) {
-//     const valorFormatado = new Intl.NumberFormat("pt-BR", {
-//       style: "currency",
-//       currency: "BRL",
-//     }).format(valor);
-//     return valorFormatado;
-//   }
-
-//   function formatPorcentagem(valor: any) {
-//     const valorFormatado = new Intl.NumberFormat("pt-BR", {
-//       style: "percent",
-//       minimumFractionDigits: 1,
-//       maximumFractionDigits: 1,
-//     }).format(valor);
-
-//     return valorFormatado;
-//   }
-
-//   const { Cor } = useTema();
-//   return (
-//     <div
-//       style={{
-//         width: "100%",
-//         display: "flex",
-//         flexDirection: "row",
-//         gap: 10,
-//         padding: 15,
-//         marginTop: 10,
-//         backgroundColor: Cor.base2,
-//         borderRadius: 22,
-//         boxShadow: Cor.sombra,
-//       }}
-//     >
-//       {/* Card Faturamento Bruto */}
-//       <CardT $cor={Cor.primaria} $direction="column" $padding="10px">
-//         <div
-//           style={{
-//             display: "flex",
-//             flexDirection: "row",
-//             justifyContent: "space-between",
-//             alignItems: "flex-start",
-//           }}
-//         >
-//           <p style={{ fontWeight: "bolder", color: "#FFF", fontSize: 14 }}>
-//             Faturamento Bruto
-//           </p>
-//           <p
-//             style={{
-//               fontFamily: "Icone",
-//               fontWeight: "bolder",
-//               fontSize: 24,
-//               color: "#FFFF",
-//             }}
-//           >
-//             local_activity
-//           </p>
-//         </div>
-//         <p style={{ fontWeight: "bolder", color: "#FFFF", fontSize: 30 }}>
-//           {formatarValor(totalViagem)}
-//         </p>
-//         <div
-//           style={{
-//             display: "flex",
-//             flexDirection: "row",
-//             gap: 5,
-//             alignItems: "center",
-//           }}
-//         >
-//           <p style={{ color: "#FFFF", fontSize: 12 }}>Fat. líquido:</p>
-//           <p style={{ fontWeight: "bolder", color: "#FFFF", fontSize: 16 }}>
-//             {formatarValor(totalViagem - totalRepasse)} |{" "}
-//             <strong style={{ color: Cor.ativo }}>
-//               {formatPorcentagem(porcentLucro / 100)}
-//             </strong>
-//           </p>
-//         </div>
-//       </CardT>
-//       {/* Card Repasse Motoristas */}
-//       <Card $cor={Cor.texto2} $direction="column" $padding="10px">
-//         <div
-//           style={{
-//             display: "flex",
-//             flexDirection: "row",
-//             justifyContent: "space-between",
-//             alignItems: "flex-start",
-//           }}
-//         >
-//           <p style={{ fontWeight: "bolder", color: Cor.texto1, fontSize: 14 }}>
-//             Total Repasses
-//           </p>
-//           <p
-//             style={{
-//               fontFamily: "Icone",
-//               fontWeight: "bolder",
-//               fontSize: 24,
-//               color: Cor.texto1,
-//             }}
-//           >
-//             car_tag
-//           </p>
-//         </div>
-//         <p style={{ fontWeight: "bolder", color: Cor.atencao, fontSize: 28 }}>
-//           {formatarValor(totalRepasse)}
-//         </p>
-//         <div
-//           style={{
-//             display: "flex",
-//             flexDirection: "row",
-//             gap: 5,
-//             alignItems: "center",
-//           }}
-//         >
-//           <p style={{ color: Cor.texto1, fontSize: 12 }}>Total de: </p>
-//           <p
-//             style={{
-//               color: Cor.texto1,
-//               fontSize: 16,
-//               display: "flex",
-//               flexDirection: "row",
-//               gap: 5,
-//               alignItems: "center",
-//             }}
-//           >
-//             <strong style={{ color: Cor.secundaria, fontSize: 20 }}>
-//               {motoristasUnicos()}
-//             </strong>{" "}
-//             motoristas
-//           </p>
-//         </div>
-//       </Card>
-//       {/* Card Horas Paradas */}
-//       <Card $cor={Cor.texto2} $direction="row" $padding="8px">
-//         <div
-//           style={{
-//             width: "50%",
-//             display: "flex",
-//             flexDirection: "column",
-//             justifyContent: "space-between",
-//             alignItems: "center",
-//           }}
-//         >
-//           <p
-//             style={{
-//               color: Cor.texto1,
-//               fontSize: 14,
-//               textAlign: "center",
-//               fontWeight: "bold",
-//             }}
-//           >
-//             Total de Horas Paradas:
-//           </p>
-//           <p
-//             style={{
-//               fontSize: 34,
-//               textAlign: "center",
-//               fontWeight: "bold",
-//               color: Cor.secundaria,
-//             }}
-//           >
-//             {qntHP}h
-//           </p>
-//         </div>
-//         <div
-//           style={{
-//             width: 1,
-//             height: "100%",
-//             backgroundColor: Cor.texto2,
-//             margin: "0 5px",
-//           }}
-//         />
-//         <div
-//           style={{
-//             width: "50%",
-//             display: "flex",
-//             flexDirection: "column",
-//             justifyContent: "space-between",
-//             alignItems: "Flex-start",
-//             gap: 10,
-//           }}
-//         >
-//           <div
-//             style={{
-//               display: "flex",
-//               flexDirection: "column",
-//               alignItems: "Flex-start",
-//             }}
-//           >
-//             <p style={{ fontSize: 12, textAlign: "center", color: Cor.texto1 }}>
-//               Cobrança:{" "}
-//             </p>
-//             <strong
-//               style={{
-//                 fontSize: 16,
-//                 textAlign: "center",
-//                 color: Cor.secundaria,
-//               }}
-//             >
-//               {formatarValor(valorCobrancaHp)}
-//             </strong>
-//           </div>
-//           <div
-//             style={{
-//               display: "flex",
-//               flexDirection: "column",
-//               alignItems: "Flex-start",
-//             }}
-//           >
-//             <p style={{ fontSize: 12, textAlign: "center", color: Cor.texto1 }}>
-//               Repasse:
-//             </p>
-//             <strong
-//               style={{
-//                 fontSize: 16,
-//                 textAlign: "center",
-//                 color: Cor.secundaria,
-//               }}
-//             >
-//               {formatarValor(valorRepasseHp)}
-//             </strong>
-//           </div>
-//         </div>
-//       </Card>
-//       {/* Card Naturezas Voucher   */}
-//       <Card $cor={Cor.texto2} $direction="row" $padding="5px">
-//         <div
-//           style={{
-//             width: "100%",
-//             height: "100%",
-//             display: "flex",
-//             flexDirection: "row",
-//             justifyContent: "space-between",
-//             alignItems: "center",
-//           }}
-//         >
-//           <div
-//             style={{
-//               width: "33%",
-//               height: "100%",
-//               display: "flex",
-//               flexDirection: "column",
-//               justifyContent: "center",
-//               alignItems: "center",
-//               gap: 5,
-//               borderRadius: "10px 0 0 10px",
-//               background:
-//                 totalFixos.length === 0
-//                   ? `linear-gradient(to top, ${Cor.texto2 + 60},${Cor.texto2 + 15})`
-//                   : `linear-gradient(to top, ${Cor.fixo + 40},${Cor.fixo + 10})`,
-//             }}
-//           >
-//             <p
-//               style={{
-//                 fontWeight: "bolder",
-//                 color: totalFixos.length === 0 ? Cor.texto2 : Cor.textoFixo,
-//                 fontSize: 32,
-//                 borderBottom:
-//                   totalFixos.length === 0
-//                     ? `1px solid ${Cor.texto2}`
-//                     : `1px solid ${Cor.fixo}`,
-//                 width: "70%",
-//                 display: "flex",
-//                 alignItems: "center",
-//                 justifyContent: "center",
-//               }}
-//             >
-//               {totalFixos.length}
-//             </p>
-//             <p
-//               style={{
-//                 color: totalFixos.length === 0 ? Cor.texto2 : Cor.textoFixo,
-//                 fontWeight: 500,
-//               }}
-//             >
-//               Fixos
-//             </p>
-//           </div>
-//           <div
-//             style={{
-//               width: 1,
-//               height: "100%",
-//               backgroundColor: Cor.texto2,
-//             }}
-//           />
-//           <div
-//             style={{
-//               width: "33%",
-//               height: "100%",
-//               display: "flex",
-//               flexDirection: "column",
-//               justifyContent: "center",
-//               alignItems: "center",
-//               gap: 5,
-//               background:
-//                 totalExtras.length === 0
-//                   ? `linear-gradient(to top, ${Cor.texto2 + 60},${Cor.texto2 + 15})`
-//                   : `linear-gradient(to top, ${Cor.extra + 40},${Cor.extra + 10})`,
-//             }}
-//           >
-//             <p
-//               style={{
-//                 fontWeight: "bolder",
-//                 color: totalExtras.length === 0 ? Cor.texto2 : Cor.textoExtra,
-//                 fontSize: 32,
-//                 borderBottom:
-//                   totalExtras.length === 0
-//                     ? `1px solid ${Cor.texto2}`
-//                     : `1px solid ${Cor.extra}`,
-//                 width: "70%",
-//                 display: "flex",
-//                 alignItems: "center",
-//                 justifyContent: "center",
-//               }}
-//             >
-//               {totalExtras.length}
-//             </p>
-//             <p
-//               style={{
-//                 color: totalExtras.length === 0 ? Cor.texto2 : Cor.textoExtra,
-//                 fontWeight: 500,
-//               }}
-//             >
-//               Extras
-//             </p>
-//           </div>
-//           <div
-//             style={{
-//               width: 1,
-//               height: "100%",
-//               backgroundColor: Cor.texto2,
-//             }}
-//           />
-//           <div
-//             style={{
-//               width: "33%",
-//               height: "100%",
-//               display: "flex",
-//               flexDirection: "column",
-//               justifyContent: "center",
-//               alignItems: "center",
-//               gap: 5,
-//               borderRadius: "0 10px 10px 0",
-//               background:
-//                 totalTurnos.length === 0
-//                   ? `linear-gradient(to top, ${Cor.texto2 + 60},${Cor.texto2 + 15})`
-//                   : `linear-gradient(to top, ${Cor.turno + 40},${Cor.turno + 10})`,
-//             }}
-//           >
-//             <p
-//               style={{
-//                 fontWeight: "bolder",
-//                 color: totalTurnos.length === 0 ? Cor.texto2 : Cor.textoTurno,
-//                 fontSize: 32,
-//                 borderBottom:
-//                   totalTurnos.length === 0
-//                     ? `1px solid ${Cor.texto2}`
-//                     : `1px solid ${Cor.turno}`,
-//                 width: "70%",
-//                 display: "flex",
-//                 alignItems: "center",
-//                 justifyContent: "center",
-//               }}
-//             >
-//               {totalTurnos.length}
-//             </p>
-//             <p
-//               style={{
-//                 color: totalTurnos.length === 0 ? Cor.texto2 : Cor.textoTurno,
-//                 fontWeight: 500,
-//               }}
-//             >
-//               Turnos
-//             </p>
-//           </div>
-//         </div>
-//       </Card>
-//     </div>
-//   );
-// }
-
 function BaseFiltros({
   filtroAtivo,
   setFiltroAtivo,
   setIdsParaBusca,
-  exportarPlanilha,
+  exportarRelatorioGeral,
+  exportarRelatorioCentroCusto,
+  exportarPDF,
   carregandoExportacao,
 }: {
   filtroAtivo: any;
   setFiltroAtivo: any;
   setIdsParaBusca: any;
-  exportarPlanilha: any;
+  exportarRelatorioGeral: any;
+  exportarRelatorioCentroCusto: any;
+  exportarPDF: any;
   carregandoExportacao: any;
 }) {
   const [filtro, setFiltro] = useState(filtroAtivo);
@@ -2555,7 +1331,7 @@ function BaseFiltros({
     setFiltroAtivo(filtro);
   };
 
-    const buscarPorIds = () => {
+  const buscarPorIds = () => {
     const idsProcessados = numerosVouchers
       .split(",")
       .map((id) => id.trim())
@@ -2563,6 +1339,8 @@ function BaseFiltros({
 
     setIdsParaBusca(idsProcessados);
   };
+
+  const [menuExportacaoAberto, setMenuExportacaoAberto] = useState(false);
 
   const { Cor } = useTema();
   return (
@@ -2576,7 +1354,7 @@ function BaseFiltros({
         marginTop: 10,
         backgroundColor: Cor.base2,
         borderRadius: 22,
-        boxShadow: Cor.sombra
+        boxShadow: Cor.sombra,
       }}
     >
       <div
@@ -3035,14 +1813,181 @@ function BaseFiltros({
           <BtnFiltrar $cor={Cor.primaria} onClick={() => handleFiltrar()}>
             Filtrar
           </BtnFiltrar>
-          <BtnFiltrar $cor={Cor.texto2} onClick={() => exportarPlanilha()}>
-            {carregandoExportacao ? "Exportando..." : "Exportar"}
-          </BtnFiltrar>
+          <ExportarContainer>
+            <BotaoExportar
+              type="button"
+              $cor={Cor.texto2}
+              $textoCor={"#222"}
+              aria-expanded={menuExportacaoAberto}
+              aria-haspopup="menu"
+              onClick={() => setMenuExportacaoAberto(!menuExportacaoAberto)}
+            >
+              {carregandoExportacao ? "Exportando..." : "Exportar"}
+              <span
+                style={{
+                  display: "inline-block",
+                  transition: "transform 0.3s ease",
+                  transform: menuExportacaoAberto
+                    ? "rotate(180deg)"
+                    : "rotate(0deg)",
+                }}
+              >
+                ▾
+              </span>
+            </BotaoExportar>
+
+            <MenuExportacao
+              $aberto={menuExportacaoAberto}
+              $bg={Cor.base2}
+              role="menu"
+            >
+              <ItemExportacao
+                type="button"
+                $textoCor={Cor.texto1}
+                role="menuitem"
+                onClick={() => {
+                  exportarRelatorioGeral();
+                  setMenuExportacaoAberto(false);
+                }}
+              >
+                Relatório Geral
+              </ItemExportacao>
+              <ItemExportacao
+                type="button"
+                $textoCor={Cor.texto1}
+                role="menuitem"
+                onClick={() => {
+                  exportarRelatorioCentroCusto();
+                  setMenuExportacaoAberto(false);
+                }}
+              >
+                Relatório Centro de Custo
+              </ItemExportacao>
+              <ItemExportacao
+                type="button"
+                $textoCor={Cor.texto1}
+                role="menuitem"
+                onClick={() => {
+                  exportarPDF();
+                  setMenuExportacaoAberto(false);
+                }}
+              >
+                Imprimir Vouchers
+              </ItemExportacao>
+            </MenuExportacao>
+          </ExportarContainer>
         </div>
       </div>
     </div>
   );
 }
+
+const ExportarContainer = styled.div`
+  position: relative;
+  width: 45%;
+  flex-shrink: 0;
+  z-index: 1;
+`;
+
+const BotaoExportar = styled.button<{ $cor: string; $textoCor: string }>`
+  width: 100%;
+  background-color: ${({ $cor }) => $cor};
+  padding: 12px;
+  border-radius: 14px;
+  border: none;
+  color: ${({ $textoCor }) => $textoCor};
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  font: inherit;
+  cursor: pointer;
+  user-select: none;
+
+  transition:
+    transform 0.2s ease,
+    opacity 0.2s ease;
+
+  &:hover {
+    transform: scale(1.02);
+  }
+
+  &:active {
+    transform: scale(0.98);
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.7;
+  }
+`;
+
+// Dropdown animado
+const MenuExportacao = styled.div<{ $aberto: boolean; $bg: string }>`
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+  z-index: 30;
+
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+
+  background-color: ${({ $bg }) => $bg};
+  border-radius: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(8px);
+
+  transform-origin: top center;
+
+  opacity: ${({ $aberto }) => ($aberto ? 1 : 0)};
+  transform: ${({ $aberto }) =>
+    $aberto ? "translateY(0) scaleY(1)" : "translateY(-12px) scaleY(0.95)"};
+
+  visibility: ${({ $aberto }) => ($aberto ? "visible" : "hidden")};
+
+  pointer-events: ${({ $aberto }) => ($aberto ? "auto" : "none")};
+
+  transition:
+    opacity 0.25s ease,
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0.25s ease;
+`;
+
+// Itens do menu
+const ItemExportacao = styled.button<{ $textoCor: string }>`
+  width: 100%;
+  padding: 11px 10px;
+
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+
+  color: ${({ $textoCor }) => $textoCor};
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    transform 0.2s ease;
+
+  &:hover {
+    background-color: rgba(128, 128, 128, 0.12);
+    transform: translateX(3px);
+  }
+
+  &:active {
+    transform: scale(0.98);
+  }
+`;
 
 interface BtnFiltrarProps {
   $cor: string;
